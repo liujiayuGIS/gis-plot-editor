@@ -57,6 +57,8 @@ def main():
              "--add-data", str(SKILL / "assets") + os.pathsep + "assets",
              "--hidden-import", "geopandas", "--hidden-import", "pyogrio", "--hidden-import", "rasterio._features",
              "--collect-submodules", "rasterio", "--collect-data", "pyproj", "--collect-data", "rasterio",
+             "--copy-metadata", "matplotlib", "--copy-metadata", "numpy", "--copy-metadata", "geopandas",
+             "--copy-metadata", "rasterio", "--copy-metadata", "pyproj",
              SKILL / "scripts/launch_gui.py"])
     if args.register_app:
         app = (args.output_dir / "GisPlotEditor" / "GisPlotEditor.exe").resolve()
