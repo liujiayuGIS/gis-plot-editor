@@ -1,0 +1,7 @@
+{
+  "mode": "factory",
+  "factory": "demo_factory.py",
+  "function": "build_scene",
+  "data_files": [],
+  "params": {}
+}
