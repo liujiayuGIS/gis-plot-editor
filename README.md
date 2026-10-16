@@ -4,7 +4,7 @@
 
 ## 安装
 
-仓库根目录就是完整 Skill（SKILL.md + scripts + references + assets）。在支持 skills CLI 的宿主中：
+仓库根目录就是完整 Skill（SKILL.md + scripts + references + assets）。在支持 skills CLI 的宿主中（需 Node.js/npm、Git 可用且 Git 在 PATH 中）：
 
 ```sh
 npx skills add liujiayuGIS/gis-plot-editor --skill gis-plot-editor

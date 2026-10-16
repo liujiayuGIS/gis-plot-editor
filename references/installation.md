@@ -4,7 +4,7 @@
 
 此仓库根目录含 SKILL.md，scripts、references、assets 放在同级；可以作为一个 Agent Skill 安装。不要只复制 SKILL.md，否则运行脚本与引用会丢失。
 
-在支持 skills CLI 的环境：
+在支持 skills CLI 的环境（需 Node.js/npm、Git 可用且 Git 在 PATH 中）：
 
 ```sh
 npx skills add liujiayuGIS/gis-plot-editor --skill gis-plot-editor
