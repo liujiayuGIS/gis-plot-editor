@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MPLBACKEND: Agg
-      MPLCONFIGDIR: ${{ runner.temp }}/gis-matplotlib
+      MPLCONFIGDIR: .matplotlib-ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
