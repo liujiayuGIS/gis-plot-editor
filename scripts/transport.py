@@ -8,16 +8,22 @@ import uuid
 from scene import read_json, write_json
 
 
-def dispatch(scene, command, folder, spec):
-    allowed = {"op", "patches", "expected_revision", "path", "dpi", "overwrite"}
+def dispatch(scene, command, folder, spec, persist=True):
+    allowed = {"op", "patches", "expected_revision", "path", "dpi", "overwrite", "jpeg_quality", "tiff_compression", "transparent", "style", "include_color_scale"}
     if not isinstance(command, dict) or set(command) - allowed:
         raise ValueError("Unknown command fields")
     op = command.get("op")
+    if op in {"patch", "undo", "redo", "style_apply"}:
+        revision = command.get("expected_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool): raise ValueError("Mutation requires integer expected_revision from list")
+        if revision != scene.revision: raise ValueError(f"Revision conflict: expected {revision}, current {scene.revision}")
     if op == "list": return {"objects": scene.list_objects(), "revision": scene.revision}
     if op == "audit": return scene.audit()
+    if op == "style_get": return scene.style_template(command.get("include_color_scale", False))
     if op == "patch": scene.edit(command.get("patches"), command.get("expected_revision"))
     elif op == "undo": scene.undo()
     elif op == "redo": scene.redo()
+    elif op == "style_apply": scene.apply_style_template(command.get("style"), command["expected_revision"], command.get("include_color_scale", False))
     elif op == "save": pass
     elif op == "export":
         path = Path(command["path"])
@@ -26,14 +32,15 @@ def dispatch(scene, command, folder, spec):
         path = path.resolve()
         if not path.is_relative_to(Path(folder).resolve()): raise ValueError("Agent export must be within the session folder")
         if not isinstance(command.get("overwrite", False), bool): raise ValueError("overwrite must be boolean")
-        result = scene.export(path, command.get("dpi", 300), command.get("overwrite", False))
-        scene.save_session(folder, spec)
+        result = scene.export(path, command.get("dpi", 300), command.get("overwrite", False),
+                              command.get("jpeg_quality", 95), command.get("tiff_compression", "tiff_lzw"), command.get("transparent", False))
+        if persist: scene.save_session(folder, spec)
         return result
     elif op == "close":
-        scene.save_session(folder, spec)
+        if persist: scene.save_session(folder, spec)
         return {"close": True, "revision": scene.revision}
-    else: raise ValueError("op must be list/audit/patch/undo/redo/save/export/close")
-    scene.save_session(folder, spec)
+    else: raise ValueError("Unknown operation; use list/audit/patch/undo/redo/save/export/close/style_get/style_apply")
+    if persist: scene.save_session(folder, spec)
     return {"revision": scene.revision, "audit": scene.audit()}
 
 
@@ -52,17 +59,37 @@ class Mailbox:
     def process(self):
         close = False
         # Completed files stay as provenance; a response means never execute again.
-        for path in sorted(self.commands.glob("*.json"), key=lambda p: p.name):
+        for path in sorted(self.commands.glob("*.json"), key=lambda p: (p.stat().st_mtime_ns, p.name)):
             if not re.fullmatch(r"[0-9a-f]{32}\.json", path.name): continue
             answer = self.responses / path.name
             if answer.exists(): continue
+            if path.stem in self.scene.processed_requests:
+                receipt = self.scene.processed_requests[path.stem]
+                write_json(answer, receipt)
+                close |= bool(receipt.get("result", {}).get("close"))
+                continue
             try:
                 if path.stat().st_size > 1024 * 1024: raise ValueError("Command exceeds 1 MB")
-                result = dispatch(self.scene, read_json(path), self.folder, self.spec)
-                write_json(answer, {"ok": True, "result": result})
-                close |= bool(result.get("close"))
+                before = self.scene.snapshot()
+                history = (list(self.scene.undo_stack), list(self.scene.redo_stack), list(self.scene.log), self.scene.revision)
+                result = dispatch(self.scene, read_json(path), self.folder, self.spec, persist=False)
+                receipt = {"ok": True, "result": result}
+                self.scene.processed_requests[path.stem] = receipt
+                # State and receipt share one atomic session.json replacement. A crash
+                # before the response is written cannot replay a committed mutation.
+                try: self.scene.save_session(self.folder, self.spec)
+                except Exception:
+                    self.scene.restore(before)
+                    self.scene.undo_stack, self.scene.redo_stack, self.scene.log, self.scene.revision = history
+                    self.scene.processed_requests.pop(path.stem, None)
+                    raise
             except Exception as exc:
                 write_json(answer, {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}, "revision": self.scene.revision})
+                continue
+            # A response-write error must not turn a committed success into a failure.
+            # The persisted receipt will recreate the missing response on the next poll.
+            write_json(answer, receipt)
+            close |= bool(result.get("close"))
         self.heartbeat()
         return close
 

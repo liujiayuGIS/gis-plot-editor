@@ -25,7 +25,16 @@ from matplotlib.patches import Patch
 from matplotlib.image import AxesImage
 from matplotlib import colors, font_manager
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+EXPORT_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".tif": "tiff", ".tiff": "tiff", ".pdf": "pdf", ".svg": "svg"}
+
+
+def software_versions():
+    result = {"python": platform.python_version()}
+    for module in ("matplotlib", "numpy", "geopandas", "rasterio", "pyproj", "Pillow"):
+        try: result[module] = importlib.metadata.version(module)
+        except importlib.metadata.PackageNotFoundError: result[module] = "not installed"
+    return result
 
 
 def read_json(path):
@@ -89,7 +98,7 @@ def font_check(family, text):
 
 
 def choose_font():
-    for name in ("Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "DejaVu Sans"):
+    for name in ("Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "SimHei", "Noto Sans CJK SC", "DejaVu Sans"):
         try:
             font_manager.findfont(font_manager.FontProperties(family=name), fallback_to_default=False)
             return name
@@ -134,7 +143,7 @@ class EditableScene:
         figure.canvas.draw()
         self.objects = {}
         self.provenance = copy.deepcopy(provenance or {})
-        self.provenance.setdefault('software', {'python': platform.python_version(), **{m: importlib.metadata.version(m) for m in ('matplotlib', 'numpy', 'geopandas', 'rasterio', 'pyproj')}})
+        self.provenance.setdefault('software', software_versions())
         self.colorbars = colorbars or {}
         self.locked_properties = {}
         self.warnings = []
@@ -142,6 +151,8 @@ class EditableScene:
         self.undo_stack = []
         self.redo_stack = []
         self.log = []
+        self.processed_requests = {}
+        self.metric_values = {}
         self.baseline = None
         for key, obj in (objects or {}).items():
             self.register(key, obj)
@@ -334,6 +345,7 @@ class EditableScene:
             raise
         after = self.snapshot()
         self.undo_stack.append(before)
+        del self.undo_stack[:-100]
         self.redo_stack.clear()
         self.revision += 1
         self.log.append({"revision": self.revision, "utc": datetime.now(timezone.utc).isoformat(), "patches": patches})
@@ -357,10 +369,61 @@ class EditableScene:
         self.undo_stack.append(current)
         self.revision += 1
 
+    def color_scale_report(self):
+        report = []
+        for key, values in self.metric_values.items():
+            low, high = self.objects[key].get_clim()
+            report.append({"target": key, "data_range": [float(values.min()), float(values.max())],
+                           "display_range": [float(low), float(high)], "count": int(values.size),
+                           "below": int(np.count_nonzero(values < low)), "above": int(np.count_nonzero(values > high))})
+        return report
+
+    def style_template(self, include_color_scale=False):
+        if not isinstance(include_color_scale, bool): raise ValueError("include_color_scale must be boolean")
+        # Never copy titles, units, category meanings, visibility or geographic extents.
+        permitted = {"fontsize", "fontfamily", "fontweight", "color", "position", "ha", "va", "rotation",
+                     "framealpha", "edgecolor", "facecolor", "framecolor", "framelinewidth", "cmap"}
+        if include_color_scale: permitted.add("clim")
+        objects = {}
+        for key, obj in self.objects.items():
+            allowed = self.allowed_properties(key) & permitted
+            if kind_of(obj) == "collection": allowed -= {"edgecolor", "facecolor"}
+            props = {p: v for p, v in self.properties(key).items() if p in allowed}
+            if props: objects[key] = {"kind": kind_of(obj), "properties": props}
+        return {"version": 1, "size_mm": [x * 25.4 for x in self.export_size_inches],
+                "includes_color_scale": include_color_scale, "objects": objects}
+
+    def apply_style_template(self, template, expected_revision=None, include_color_scale=False):
+        if not isinstance(template, dict) or template.get("version") != 1: raise ValueError("Unsupported style template")
+        if not isinstance(include_color_scale, bool): raise ValueError("include_color_scale must be boolean")
+        size = vector(template.get("size_mm"), 2, "size_mm")
+        for length in size: finite(length, "size_mm", 50, 1000)
+        allowed = self.style_template(include_color_scale)["objects"]
+        patches = []
+        for key, entry in template.get("objects", {}).items():
+            if key not in self.objects: raise ValueError(f"Style object ID missing: {key}; map IDs explicitly before applying")
+            if not isinstance(entry, dict) or entry.get("kind") != kind_of(self.objects[key]): raise ValueError("Style object type mismatch")
+            props = entry.get("properties")
+            if not isinstance(props, dict): raise ValueError("Style properties must be an object")
+            permitted = set(allowed.get(key, {}).get("properties", {}))
+            # A template may contain an explicit shared clim; applying it needs opt-in.
+            props = {p: v for p, v in props.items() if p != "clim" or include_color_scale}
+            if set(props) - permitted: raise ValueError(f"Style includes semantic/locked properties for {key}")
+            if props: patches.append({"target": key, "properties": props})
+        if not patches: raise ValueError("Style template has no applicable properties")
+        self.edit(patches, expected_revision)
+        self.export_size_inches = [x / 25.4 for x in size]
+        self.log[-1]["size_mm"] = size
+        return self.snapshot()
+
     def audit(self):
         self.figure.canvas.draw()
         renderer = self.figure.canvas.get_renderer() if hasattr(self.figure.canvas, "get_renderer") else None
         issues = list(self.warnings)
+        scales = self.color_scale_report()
+        for scale in scales:
+            if scale["below"] or scale["above"]:
+                issues.append(f"Colour scale clips {scale['target']}: below={scale['below']}, above={scale['above']} of {scale['count']}")
         if renderer:
             frame = self.figure.bbox
             boxes = []
@@ -376,13 +439,24 @@ class EditableScene:
                     boxes.append((key, box))
                 except (AttributeError, ValueError):
                     issues.append(f"Extent unavailable: {key}")
-        return {"revision": self.revision, "issues": list(dict.fromkeys(issues)),
+        return {"revision": self.revision, "issues": list(dict.fromkeys(issues)), "color_scales": scales,
+                "checklist": {"figure_size_mm": [round(x * 25.4, 3) for x in self.export_size_inches],
+                              "display_crs_declared": bool(self.provenance.get("display_crs_wkt")),
+                              "input_hashes_recorded": bool(self.provenance.get("data_hashes")),
+                              "layers": self.provenance.get("layers", []),
+                              "manual_review": ["地图证据遮挡", "投影适用范围", "数据来源与发表要求", "最终尺寸下的文字与线宽"]},
                 "scope": "registered furniture clipping/overlap plus GIS preflight; inspect map evidence and final-size output manually"}
 
-    def export(self, path, dpi=300, overwrite=False):
+    def export(self, path, dpi=300, overwrite=False, jpeg_quality=95, tiff_compression="tiff_lzw", transparent=False):
         path = Path(path).resolve()
-        if path.suffix.lower() not in {".png", ".pdf", ".svg"}: raise ValueError("Export supports PNG/PDF/SVG")
+        output_format = EXPORT_FORMATS.get(path.suffix.lower())
+        if output_format is None: raise ValueError("Export supports TIFF (.tif/.tiff), PNG, JPEG (.jpg/.jpeg), PDF and SVG")
         finite(dpi, "dpi", 36, 1200)
+        if not isinstance(transparent, bool): raise ValueError("transparent must be boolean")
+        if not isinstance(jpeg_quality, int) or isinstance(jpeg_quality, bool) or not 1 <= jpeg_quality <= 100:
+            raise ValueError("jpeg_quality must be an integer in 1..100")
+        if tiff_compression not in {"tiff_lzw", "tiff_adobe_deflate", "raw"}: raise ValueError("Unsupported TIFF compression")
+        if output_format == "jpeg" and transparent: raise ValueError("JPEG does not support transparency; use PNG/TIFF or transparent=false")
         sidecar = path.with_suffix(path.suffix + ".manifest.json")
         if not overwrite and (path.exists() or sidecar.exists()): raise FileExistsError("Export/manifest already exists; choose a new name")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,20 +466,28 @@ class EditableScene:
         current_size = self.figure.get_size_inches().copy()
         try:
             self.figure.set_size_inches(self.export_size_inches)
+            # Inspect the physical export size, not the resized desktop preview.
+            final_audit = self.audit()
+            options = {}
+            if output_format == "jpeg": options["pil_kwargs"] = {"quality": jpeg_quality, "subsampling": 0}
+            if output_format == "tiff": options["pil_kwargs"] = {"compression": tiff_compression}
             with matplotlib.rc_context({"svg.fonttype": "none", "pdf.fonttype": 42, "savefig.bbox": None}):
-                self.figure.savefig(tmp, dpi=dpi, bbox_inches=None, facecolor=self.figure.get_facecolor())
+                self.figure.savefig(tmp, format=output_format, dpi=dpi, bbox_inches=None, transparent=transparent,
+                                    facecolor="white" if output_format == "jpeg" else ("none" if transparent else self.figure.get_facecolor()), **options)
             os.replace(tmp, path)
         finally:
             self.figure.set_size_inches(current_size)
             self.figure.canvas.draw()
             if Path(tmp).exists(): Path(tmp).unlink()
-        write_json(sidecar, {"version": VERSION, "revision": self.revision, "dpi": dpi,
+        write_json(sidecar, {"version": VERSION, "revision": self.revision, "dpi": dpi, "format": output_format,
+                            "export_options": {"transparent": transparent, "jpeg_quality": jpeg_quality, "tiff_compression": tiff_compression},
                             "size_inches": list(self.export_size_inches), "provenance": self.provenance,
-                            "state": self.snapshot(), "audit": self.audit(), "sha256": file_hash(path)})
+                            "state": self.snapshot(), "audit": final_audit, "sha256": file_hash(path)})
         return {"path": str(path), "manifest": str(sidecar), "revision": self.revision}
 
     def save_session(self, folder, spec):
         folder = Path(folder)
         write_json(folder / "session.json", {"version": VERSION, "spec": spec, "provenance": self.provenance,
                    "revision": self.revision, "state": self.snapshot(), "baseline": self.baseline,
-                   "undo": self.undo_stack[-100:], "redo": self.redo_stack[-100:], "log": self.log})
+                   "undo": self.undo_stack[-100:], "redo": self.redo_stack[-100:], "log": self.log,
+                   "processed_requests": self.processed_requests})

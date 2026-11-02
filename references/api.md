@@ -103,13 +103,41 @@ band 从 1 开始。nearest 保留类别，bilinear 仅适用于连续变量。�
 `expected_revision` 必须来自刚取得的 list，不把示例 0 硬编码。位置：标题/普通注释沿 Artist transform；内置 title 为 Figure 比例坐标。图例为 Figure 比例坐标 `[x,y]`（左下锚点）。Axes 为 Figure 比例坐标 `[x,y,width,height]`。左下为原点，不能将屏幕像素直接传入。
 
 操作：
-- `{"op":"undo"}` / `{"op":"redo"}`
+- `undo` / `redo`：携带 list 返回的整数 `expected_revision`，例如 `{"op":"undo","expected_revision":1}`
 - `{"op":"audit"}`
 - `{"op":"save"}`
 - `{"op":"export","path":"final.png","dpi":300,"overwrite":false}`
 - `{"op":"close"}`
 
 Agent export 相对 path 落在会话 `exports/`，绝对 path 必须在会话目录下。超时会返回 response_path，原请求可能仍执行，先查响应再决定重试。
+
+`patch` / `undo` / `redo` / `style_apply` 必须携带刚从 list 得到的整数 `expected_revision`，缺失或冲突拒绝修改。
+
+### 多格式导出
+
+扩展名不区分大小写：`.tif/.tiff`、`.png`、`.jpg/.jpeg`、`.pdf`、`.svg`。格式按扩展名选择，固定物理图幅，DPI 范围 36–1200。
+
+```json
+{"op":"export","path":"figure.tiff","dpi":600,"tiff_compression":"tiff_lzw","transparent":false,"overwrite":false}
+```
+
+- TIFF 压缩：`tiff_lzw`（默认）、`tiff_adobe_deflate`、`raw`，均无损。输出为排版图片，不是带地理配准的 GeoTIFF。
+- JPEG：`jpeg_quality` 为 1–100 整数，默认 95，白底；`transparent:true` 报错。
+- 其他格式可选 `transparent:true`，默认 false；JPEG 不支持透明。
+- render CLI 对应 `--jpeg-quality`、`--tiff-compression`、`--transparent`。
+- manifest 保存格式、图幅、DPI、选项、输入哈希、色标截断数量和最终物理尺寸下的 audit。
+
+### 样式模板
+
+发送 `{"op":"style_get"}`，将返回的 result 保存为 JSON 模板。可加 `include_color_scale:true` 包含色标上下限。应用示例：
+
+```json
+{"op":"style_apply","expected_revision":0,"style":{"version":1,"size_mm":[180,130],"objects":{"title":{"kind":"text","properties":{"fontsize":14}}}},"include_color_scale":false}
+```
+
+0 只是示例，替换为 list 返回的版本。复用布局、字体、色带和图幅；禁止在模板中注入标题、单位、几何、指标、投影、范围或隐藏图层等语义变化。对象 ID 和类型必须匹配；分类/单色图层的锁定属性仍受保护。应用色标范围须再次显式 `include_color_scale:true`，并确认两图指标与单位一致。一次应用只占一个撤销步骤。
+
+`audit` 返回 `color_scales`（真实/显示范围、有限样本数、上下界外数量）及 `checklist`（图幅、CRS、哈希、图层记录与人工复核项）。栅格统计针对已读取的显示网格，不声称是全分辨率总体统计。
 
 ## 属性白名单
 
@@ -119,4 +147,4 @@ Agent export 相对 path 落在会话 `exports/`，绝对 path 必须在会话�
 
 ## 会话文件
 
-`session.json` 是持久状态：spec、输入哈希、对象状态、revision、baseline、undo/redo、修改日志。`runtime.json` 是运行心跳，不是数据权威。`editor.lock` 防止同会话多窗口。commands/responses 保存幂等请求证据。关闭后通过 spec 重建 Figure 再恢复样式，不跨版本反序列化 Figure。
+`session.json` 是持久状态：spec、输入哈希、对象状态、revision、baseline、undo/redo、修改日志和已提交命令回执。`runtime.json` 是运行心跳，不是数据权威。`editor.lock` 由操作系统持锁，文件保留，进程退出自动释放；不能因心跳过期就删除锁。GUI 和 render 均持锁。commands/responses 保存请求证据；状态和回执一起原子保存，崩溃后补写响应，避免重放已提交修改。导出文件属于外部副作用，进程在图片写入后、提交回执前退出时，需检查图片/manifest，不能保证跨文件事务。关闭后通过 spec 重建 Figure 再恢复样式，不跨版本反序列化 Figure。
