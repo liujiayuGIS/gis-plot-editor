@@ -1,6 +1,6 @@
 ---
 name: gis-plot-editor
-description: 在 Python GIS 制图、已有 Matplotlib Figure 接入、标题/字体/图例/色标/图框微调、首图持续编辑、点选拖拽、撤销恢复与 PNG/PDF/SVG 导出时使用。支持 GeoJSON、Shapefile、GeoPackage、GeoTIFF，本地 Tk 编辑窗口与同一 Agent 的文件式命令接口。保留指标结果，不用于从 PNG 恢复原始指标或自动完成地图发布审核。
+description: 在 Python GIS 制图、已有 Matplotlib Figure 接入、标题/字体/图例/色标/图框微调、多图样式复用、点选拖拽、撤销恢复与 TIFF/PNG/JPEG/PDF/SVG 导出时使用。支持 GeoJSON、Shapefile、GeoPackage、GeoTIFF，本地 Tk 编辑窗口与同一 Agent 的文件式命令接口。保留指标结果，不用于从 PNG 恢复原始指标或自动完成地图发布审核。
 ---
 
 # GIS Plot Editor
@@ -51,6 +51,8 @@ description: 在 Python GIS 制图、已有 Matplotlib Figure 接入、标题/�
 4. 发送 patch，检查 `ok` 和实际对象属性/审计提示；在窗口或最终渲染中检查改动。操作失败不能当完成。
 5. 用户继续调整时沿用同一会话。`undo` / `redo` 与 UI 共用历史；自动保存修改。
 
+所有 Agent 修改命令（patch/undo/redo/style_apply）必须携带 list 返回的整数 expected_revision。复用样式时使用 style_get/style_apply，保留目标图标题、单位与空间语义。共享色标范围前确认指标、单位一致，并显式 include_color_scale:true。检查 audit.color_scales 的上下界外样本数量，不能忽略截断提示。
+
 窗口支持对象列表、属性面板、标题/普通注释/图例/图框拖拽。带箭头注释、真北与比例尺是复合约束对象，不支持拆开拖拽；复杂复合对象需独立适配器。
 
 ### 4. 关闭与恢复
@@ -62,6 +64,8 @@ description: 在 Python GIS 制图、已有 Matplotlib Figure 接入、标题/�
 ### 5. 导出与交付
 
 先 audit，再检查实际渲染。导出显式图幅、DPI、格式和来源记录；不默认使用 `bbox_inches='tight'` 改变尺寸。Agent 导出限定在会话目录，已有文件需明确 overwrite；UI 使用文件对话框确认替换。
+
+支持 TIFF（.tif/.tiff）、PNG、JPEG（.jpg/.jpeg）、PDF、SVG。TIFF 默认 LZW 无损压缩，属于排版成图而非 GeoTIFF；JPEG 默认质量 95、白底且不支持透明。其他格式按需 transparent:true。DPI 36–1200；保存格式、压缩/质量及透明度到 manifest。详见 API 的多格式导出。
 
 检查图例与数据/分级一致、对象裁切、字体、地图证据遮挡、投影与图层范围、栅格分辨率、色标单位。审计只检测注册文字/图例裁切与互相重叠，不声称自动检测全部地物遮挡。
 

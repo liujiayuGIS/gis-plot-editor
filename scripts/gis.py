@@ -13,7 +13,6 @@ from matplotlib.colors import Normalize, BoundaryNorm, ListedColormap
 from matplotlib import colormaps
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from pyproj import CRS, Transformer
 
 from scene import EditableScene, choose_font, file_hash, finite, font_check
 
@@ -53,6 +52,7 @@ def inputs(spec):
 
 
 def checked_crs(actual, layer):
+    from pyproj import CRS
     declared = layer.get("source_crs")
     if actual is None:
         if not declared or layer.get("crs_confirmed") is not True:
@@ -73,7 +73,20 @@ def check_geographic_bounds(bounds, crs):
             raise ValueError("Antimeridian-crossing data requires explicit splitting; this local editor does not silently wrap it")
 
 
+def legend_handles(geometry_types, color, label, linewidth=.8, point_size=20):
+    """Represent each geometry family instead of depicting roads/sites as polygons."""
+    families = {"point" if "Point" in kind else "line" if "Line" in kind else "polygon" for kind in geometry_types}
+    handles = []
+    for family in sorted(families):
+        name = label if len(families) == 1 else f"{label} ({family})"
+        if family == "point": handles.append(Line2D([], [], marker="o", linestyle="", color=color, markersize=math.sqrt(point_size), label=name))
+        elif family == "line": handles.append(Line2D([], [], color=color, linewidth=linewidth, label=name))
+        else: handles.append(Patch(facecolor=color, label=name))
+    return handles
+
+
 def build_gis(spec):
+    from pyproj import CRS, Transformer
     import geopandas as gpd
     import rasterio
     from rasterio.vrt import WarpedVRT
@@ -98,7 +111,7 @@ def build_gis(spec):
     ax.set_ylabel("Latitude (°)" if target.is_geographic else f"Y ({target.axis_info[1].unit_name})", fontfamily=font)
     title = fig.text(.5, .95, spec.get("title", ""), ha="center", va="top", fontsize=13, fontfamily=font)
     objects = {"map.main": ax, "title": title, "map.xlabel": ax.xaxis.label, "map.ylabel": ax.yaxis.label}
-    colorbars, records, notices, handles = {}, [], [], []
+    colorbars, records, notices, handles, metrics = {}, [], [], [], {}
     layer_ids = set()
     for index, layer in enumerate(spec["layers"]):
         lid = layer.get("id", f"layer{index}")
@@ -131,7 +144,7 @@ def build_gis(spec):
             mappable = None
             if not field:
                 projected.plot(color=layer.get("color", "#83a8b6"), **kwargs)
-                handles.append(Patch(facecolor=layer.get("color", "#83a8b6"), label=layer.get("label", lid)))
+                handles.extend(legend_handles(data.geom_type.unique(), layer.get("color", "#83a8b6"), layer.get("label", lid), kwargs["linewidth"], kwargs["markersize"]))
             else:
                 if field not in data: raise ValueError(f"Missing field {field}")
                 encoding = layer.get("encoding")
@@ -149,8 +162,9 @@ def build_gis(spec):
                     norm = BoundaryNorm(np.arange(len(categories) + 1) - .5, len(categories))
                     projected.assign(__plotvalue=cat_values).plot(column="__plotvalue", cmap=color_map, norm=norm,
                       missing_kwds={"color": layer.get("missing_color", "#d6d6d6"), "label": "No data"}, **kwargs)
-                    handles.extend(Patch(facecolor=mapping[c], label=c) for c in categories)
-                    if values.isna().any(): handles.append(Patch(facecolor=layer.get("missing_color", "#d6d6d6"), label="No data"))
+                    for c in categories:
+                        handles.extend(legend_handles(data.geom_type.unique(), mapping[c], c, kwargs["linewidth"], kwargs["markersize"]))
+                    if values.isna().any(): handles.extend(legend_handles(data.geom_type.unique(), layer.get("missing_color", "#d6d6d6"), layer.get("missing_label", "No data"), kwargs["linewidth"], kwargs["markersize"]))
                     record.update(field=field, encoding=encoding, categories=categories, colors=mapping)
                 else:
                     try: numeric = values.to_numpy(dtype=float)
@@ -163,6 +177,8 @@ def build_gis(spec):
                     if not math.isfinite(low + high) or low >= high: raise ValueError("Invalid clim")
                     projected.plot(column=field, cmap=cmap_name, norm=Normalize(low, high),
                         missing_kwds={"color": layer.get("missing_color", "#d6d6d6"), "label": "No data"}, **kwargs)
+                    if values.isna().any():
+                        handles.extend(legend_handles(data.geom_type.unique(), layer.get("missing_color", "#d6d6d6"), layer.get("missing_label", "No data"), kwargs["linewidth"], kwargs["markersize"]))
                     record.update(field=field, encoding=encoding, range=[float(valid.min()), float(valid.max())], clim=[low, high], units=layer.get("units", "unspecified"))
                     if not layer.get("units"): notices.append(f"{lid}: metric units unspecified; confirm before publication")
                     mappable = next((c for c in ax.collections[start:] if c.get_array() is not None), None)
@@ -175,6 +191,7 @@ def build_gis(spec):
                 bar = fig.colorbar(mappable, cax=cax)
                 bar.set_label(f"{field} ({layer.get('units', 'units unspecified')})", fontfamily=font)
                 colorbars[key] = bar
+                metrics[key] = valid.copy()
                 objects[f"colorbar.{lid}"] = cax
                 objects[f"colorbarlabel.{lid}"] = cax.yaxis.label
         elif suffix in {".tif", ".tiff"}:
@@ -210,6 +227,7 @@ def build_gis(spec):
                     bar = fig.colorbar(im, cax=cax)
                     bar.set_label(layer.get("label", f"{lid} ({layer.get('units', 'units unspecified')})"), fontfamily=font)
                     colorbars[key] = bar
+                    metrics[key] = np.asarray(values.compressed()).copy()
                     objects[f"colorbar.{lid}"] = cax
                     objects[f"colorbarlabel.{lid}"] = cax.yaxis.label
                     record.update(source_crs=source.to_wkt(), band=band, source_shape=[source_file.height, source_file.width],
@@ -270,6 +288,7 @@ def build_gis(spec):
                                           "layers": records, "results_locked": True,
                                           "boundary_review": "User must verify source/version and publication requirements; not an approval certificate"}, colorbars)
     scene.warnings = notices
+    scene.metric_values = metrics
     for key, obj in scene.objects.items():
         if key.startswith('layer.'):
             # Named categories and single-colour layers have proxy legend keys.
@@ -327,6 +346,7 @@ def open_session(folder, spec=None, trusted=False):
         scene.undo_stack = saved["undo"]
         scene.redo_stack = saved["redo"]
         scene.log = saved["log"]
+        scene.processed_requests = saved.get("processed_requests", {})
     else:
         if spec is None: raise ValueError("New session requires a spec")
         scene = build_scene(spec, trusted)

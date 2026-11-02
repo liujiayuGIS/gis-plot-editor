@@ -2,6 +2,12 @@
 
 面向 GIS 研究制图的可编辑 Matplotlib Skill。由同一个 Agent 完成“首次出图 → 自然语言微调/点选拖拽 → 撤销恢复 → 导出”，默认不重跑空间分析或改写指标值。
 
+![运行时回归](https://github.com/liujiayuGIS/gis-plot-editor/actions/workflows/tests.yml/badge.svg)
+
+![同一 Figure 编辑后的合成成图](assets/demo-edited.svg)
+
+图中为合成示例，不代表真实地理数据。运行下方命令可在本地窗口点选、修改属性并拖拽标题、图例与图框。
+
 ## 安装
 
 仓库根目录就是完整 Skill（SKILL.md + scripts + references + assets）。在支持 skills CLI 的宿主中（需 Node.js/npm、Git 可用且 Git 在 PATH 中）：
@@ -26,9 +32,10 @@ python scripts/setup_runtime.py --install
 - 直接读取 GeoJSON、Shapefile、GeoPackage、GeoTIFF；也能接入已有可信 Python Figure 工厂。
 - 持续保留 Figure 与语义 Artist 注册表，微调标题、字体、图例、色标、图框、透明度等。
 - 本地 Tk 对象列表、属性编辑与拖拽；Agent 使用白名单 JSON 的文件式命令，无网络服务。
-- revision 冲突检测，撤销/重做、关闭恢复、输入哈希检查。
+- revision 冲突检测，撤销/重做、关闭恢复、输入哈希检查；系统级会话锁和随状态原子保存的命令回执。
 - 源/显示 CRS 分开、缺失/冲突门禁、图层重投影、NoData、分级/图例一致性、局部比例尺/真北预检。
-- PNG/PDF/SVG 固定物理图幅导出与 provenance manifest。
+- TIFF/PNG/JPEG/PDF/SVG 固定物理图幅导出与 provenance manifest；DPI、JPEG 质量、TIFF 无损压缩与透明背景选项。
+- 点/线/面图例、连续变量缺失值图例、色标截断数量检查，以及按对象 ID 复用的外观模板。
 
 自然语言由调用该 Skill 的 Agent 理解；运行时不带额外 LLM、不需要另一个 Agent 或模型 Key。
 
@@ -51,11 +58,35 @@ python scripts/gis_editor.py gui --spec scene.json --session plot-session
 `assets/demo.json` 与 `assets/demo_factory.py` 为明确标注的合成示例，不是真实地理研究结果。
 
 ```sh
-python scripts/test_gis_editor.py
+# 已审查的仓库演示 factory，合成数据。
+python scripts/gis_editor.py gui --spec assets/demo.json --session demo-session --trusted-factory
+
+# 无界面导出：扩展名也可改成 png / jpg / pdf / svg。
+python scripts/gis_editor.py render --spec assets/demo.json --session tiff-session --trusted-factory --output demo.tiff --dpi 600
+
+python -m unittest discover -s scripts -p 'test_*.py' -v
 python scripts/gis_editor.py doctor
 ```
 
-Windows 已执行 22 项回归，覆盖指标不变、撤销/恢复、CRS 门禁、三种矢量格式、栅格 NoData、连续色标联动、分类图例、固定导出尺寸与命令安全边界。真实 Tk 窗口、Agent 查询/修改/导出已检查。测试不是科学有效性、无障碍或地图发布合规认证。
+测试覆盖指标不变、撤销/恢复、CRS 门禁、三种矢量格式、栅格 NoData、图例、色标、导出尺寸/DPI/压缩与透明度、异常中断后命令去重和跨进程会话锁。GitHub Actions 在 Windows/macOS/Linux 执行无界面回归；这不替代真实桌面 GUI、超大数据或科学有效性的验证。
+
+## 导出格式
+
+| 格式 | 扩展名 | 选项与用途 |
+| --- | --- | --- |
+| TIFF | `.tif` / `.tiff` | 默认 LZW 无损压缩；可选 Deflate 或不压缩，支持透明背景 |
+| PNG | `.png` | 无损，支持透明背景 |
+| JPEG | `.jpg` / `.jpeg` | 默认质量 95，白底，适合分享；不支持透明背景 |
+| PDF | `.pdf` | 矢量图形与嵌入字体；栅格图层仍为栅格 |
+| SVG | `.svg` | 矢量图形与文字；接收端需安装对应字体 |
+
+GUI 可设置 DPI；命令行可加 `--jpeg-quality 95`、`--tiff-compression tiff_lzw`、`--transparent`。每个成图旁生成 `.manifest.json`，保存物理图幅、DPI、格式、选项、输入哈希和最终尺寸下的检查结果。TIFF 是排版成图，不包含 GeoTIFF 地理配准。
+
+## 多幅论文图统一样式
+
+在编辑器中保存/应用样式模板，或通过 `style_get` / `style_apply` 命令操作。模板复用字体、布局、色带和图幅，保留目标图的标题、单位、数据、投影与地图范围。共享色标上下限必须显式选择，并先核对指标含义和单位；对象 ID 与类型必须匹配。完整接口见 [API](references/api.md)。
+
+通过 `size_mm` 指定图幅，例如 `[85, 65]` 或 `[180, 130]`，以期刊要求为准。中文字体自动探测 Windows/macOS/Linux 常见字体，也可用 `font` 显式指定已安装字体。应用模板可撤销。
 
 ## 边界
 
@@ -65,7 +96,7 @@ Windows 已执行 22 项回归，覆盖指标不变、撤销/恢复、CRS 门禁
 - 数据几何/指标默认锁定；投影、范围、分级语义变更建立新配置，不是装饰补丁。
 - 栅格预览可限采样尺寸；高 DPI 不自动恢复原始栅格细节。
 - 工厂只能执行自己编写或已审查的可信本地代码；列出全部数据依赖以支持哈希检查。
-- 尚未验证 Linux/macOS GUI、任意第三方 Artist、所有投影或超大数据生产场景。
+- 跨平台无界面回归不等于 Linux/macOS GUI 验证；任意第三方 Artist、所有投影和超大数据生产场景仍需单独测试。
 
 ## 来源
 

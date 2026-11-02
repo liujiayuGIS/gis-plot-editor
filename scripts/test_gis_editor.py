@@ -192,7 +192,7 @@ class EditorTests(unittest.TestCase):
     def test_mailbox_idempotency(self):
         box = Mailbox(self.path, self.scene, self.demo)
         rid = "a" * 32
-        write_json(self.path / "commands" / (rid + ".json"), {"op": "patch", "patches": [{"target": "title", "properties": {"text": "mailbox"}}]})
+        write_json(self.path / "commands" / (rid + ".json"), {"op": "patch", "expected_revision": 0, "patches": [{"target": "title", "properties": {"text": "mailbox"}}]})
         box.process(); self.assertTrue(read_json(self.path / "responses" / (rid + ".json"))["ok"])
         box.process(); self.assertEqual(self.scene.revision, 1)
         with self.assertRaises(ValueError): dispatch(self.scene, {"op": "export", "path": str(self.path.parent / "escape.png")}, self.path, self.demo)
@@ -202,6 +202,28 @@ class EditorTests(unittest.TestCase):
         for value in ('{"a":1,"a":2}', '{"a":NaN}', "{'a':1}"):
             path.write_text(value, encoding="utf-8")
             with self.assertRaises(ValueError): read_json(path)
+
+    def test_continuous_missing_values_legend(self):
+        path = self.path / "missing.geojson"
+        gpd.GeoDataFrame({"value": [10., np.nan, 100.]},
+                        geometry=[Point(114, 22.5), Point(114.1, 22.6), Point(114.2, 22.55)], crs=4326).to_file(path)
+        scene = build_scene({"display_crs": "EPSG:32650", "layers": [{"id": "sites", "path": str(path),
+                            "field": "value", "encoding": "continuous", "units": "score", "clim": [20, 80]}]})
+        self.assertEqual([t.get_text() for t in scene.objects["legend"].get_texts()], ["No data"])
+        report = scene.audit()["color_scales"][0]
+        self.assertEqual((report["count"], report["below"], report["above"]), (2, 1, 1))
+        self.assertEqual(scene.objects["legend"].legend_handles[0].__class__.__name__, "Line2D")
+
+    def test_geometry_specific_legend_handles(self):
+        from gis import legend_handles
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+        point = legend_handles(["Point"], "blue", "Sites")[0]
+        line = legend_handles(["LineString"], "red", "Roads")[0]
+        polygon = legend_handles(["Polygon"], "gray", "Areas")[0]
+        self.assertIsInstance(point, Line2D); self.assertEqual(point.get_marker(), "o")
+        self.assertIsInstance(line, Line2D); self.assertEqual(line.get_linestyle(), "-")
+        self.assertIsInstance(polygon, Patch)
 
     def test_audit_detects_clipping(self):
         self.scene.edit([{"target": "title", "properties": {"position": [2, 2]}}])

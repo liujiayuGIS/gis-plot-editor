@@ -17,9 +17,10 @@ from matplotlib.legend import Legend
 from matplotlib.axes import Axes
 import numpy as np
 
-from scene import read_json, write_json
+from scene import read_json, write_json, finite
 from gis import build_scene, normalise_spec, open_session
 from transport import Mailbox, send
+from session_lock import SessionLock
 
 
 class PreviewToolbar(NavigationToolbar2Tk):
@@ -54,7 +55,12 @@ class Editor:
         ttk.Button(actions, text="重做", command=lambda: self.history("redo")).pack(side="left", expand=True, fill="x")
         ttk.Button(right, text="检查布局与 GIS 提示", command=self.audit).pack(fill="x", pady=5)
         ttk.Button(right, text="保存会话", command=self.save).pack(fill="x", pady=5)
-        ttk.Button(right, text="导出 PNG / PDF / SVG", command=self.export).pack(fill="x", pady=5)
+        self.export_dpi = tk.StringVar(value="300")
+        ttk.Label(right, text="导出 DPI（36–1200）").pack(anchor="w")
+        ttk.Combobox(right, textvariable=self.export_dpi, values=[150, 300, 600, 1200], width=10).pack(fill="x")
+        ttk.Button(right, text="导出 TIFF / PNG / JPG / PDF / SVG", command=self.export).pack(fill="x", pady=5)
+        ttk.Button(right, text="保存样式模板", command=self.save_style).pack(fill="x", pady=3)
+        ttk.Button(right, text="应用样式模板", command=self.load_style).pack(fill="x", pady=3)
         ttk.Label(right, text="拖拽：选中标题、注释、图例或图框\n图框位置：整幅图的比例坐标\n数据值/几何坐标：只读\n改投影、范围：修改配置并建新会话", wraplength=290, justify="left").pack(anchor="w", pady=12)
         self.status = tk.StringVar(value="已加载；样式编辑不会重跑分析")
         ttk.Label(root, textvariable=self.status, wraplength=1080, padding=8).pack(fill="x")
@@ -170,7 +176,27 @@ class Editor:
     def audit(self):
         audit = self.scene.audit()
         messagebox.showinfo("检查范围：布局预检，不代表科学/发布合规认证",
-                            "\n".join(audit["issues"]) or "注册的标题/图例未发现裁切或互相重叠；仍需人工检查是否遮挡地图证据。", parent=self.root)
+                            "图幅：" + " × ".join(str(x) for x in audit["checklist"]["figure_size_mm"]) + " mm\n" +
+                            ("\n".join(audit["issues"]) or "注册文字/图例未发现裁切重叠。") +
+                            "\n人工复核：" + "、".join(audit["checklist"]["manual_review"]), parent=self.root)
+
+    def save_style(self):
+        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json", title="保存外观模板", filetypes=[("JSON", "*.json")])
+        if not path: return
+        shared = messagebox.askyesno("统一色标", "是否在模板中包含连续指标的色标范围？仅在指标含义和单位相同时共享。", parent=self.root)
+        try: write_json(path, self.scene.style_template(shared))
+        except Exception as exc: messagebox.showerror("模板保存失败", str(exc), parent=self.root)
+
+    def load_style(self):
+        path = filedialog.askopenfilename(parent=self.root, title="应用外观模板", filetypes=[("JSON", "*.json")])
+        if not path: return
+        try:
+            template = read_json(path)
+            shared = bool(template.get("includes_color_scale")) and messagebox.askyesno("统一色标", "模板包含色标范围。已确认两图的指标含义、单位一致，并应用该范围？", parent=self.root)
+            self.scene.apply_style_template(template, self.scene.revision, shared)
+            self.save(silent=True); self.canvas.draw_idle()
+            if self.selected: self.populate_value()
+        except Exception as exc: messagebox.showerror("模板未应用", str(exc), parent=self.root)
 
     def save(self, silent=False):
         import matplotlib
@@ -186,15 +212,18 @@ class Editor:
         if not silent: self.status.set(f"会话已保存：{self.folder / 'session.json'}")
 
     def export(self):
+        try: dpi = finite(float(self.export_dpi.get()), "dpi", 36, 1200)
+        except ValueError as exc:
+            messagebox.showerror("DPI 无效", str(exc), parent=self.root); return
         path = filedialog.asksaveasfilename(parent=self.root, initialdir=self.folder, defaultextension=".png",
-                  filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")], title="导出成图（保留实际图幅尺寸）")
+                  filetypes=[("TIFF", "*.tif *.tiff"), ("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg"), ("PDF", "*.pdf"), ("SVG", "*.svg")], title="导出成图（保留实际图幅尺寸）")
         if not path: return
         try:
             overwrite = False
             if Path(path).exists() or Path(path + ".manifest.json").exists():
                 overwrite = messagebox.askyesno("确认替换", "将替换所选成图及对应来源记录，是否继续？", parent=self.root)
                 if not overwrite: return
-            result = self.scene.export(path, overwrite=overwrite)
+            result = self.scene.export(path, dpi=dpi, overwrite=overwrite)
             self.save(silent=True); self.status.set("已导出：" + result["path"])
         except Exception as exc: messagebox.showerror("导出失败", str(exc), parent=self.root)
 
@@ -207,6 +236,7 @@ class Editor:
                     self.save(silent=True)
                     self.canvas.draw_idle()
                     if self.selected: self.populate_value()
+            else: self.mailbox.heartbeat()
         except Exception as exc: self.status.set("命令处理异常：" + str(exc))
         self.root.after(200, self.poll)
 
@@ -216,19 +246,7 @@ class Editor:
 
 
 def acquire_lock(folder):
-    folder = Path(folder); folder.mkdir(parents=True, exist_ok=True)
-    lock = folder / "editor.lock"
-    if lock.exists():
-        status = folder / "runtime.json"
-        if status.exists():
-            s = read_json(status)
-            if s.get("state") == "running" and time.time() - s.get("heartbeat", 0) < 10:
-                raise RuntimeError("Session is already open; use send instead of opening a second editor")
-        # stale lock only; never kill processes or overwrite user state
-        lock.unlink()
-    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    with os.fdopen(fd, "w") as stream: stream.write(str(os.getpid()))
-    return lock
+    return SessionLock(folder)
 
 
 def gui(folder, spec_path=None, trusted=False):
@@ -243,7 +261,7 @@ def gui(folder, spec_path=None, trusted=False):
         Editor(root, scene, folder, spec)
         root.mainloop()
     finally:
-        if lock.exists(): lock.unlink()
+        lock.release()
 
 
 def welcome():
@@ -287,6 +305,9 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     g = commands.add_parser("gui"); g.add_argument("--session"); g.add_argument("--spec"); g.add_argument("--trusted-factory", action="store_true")
     r = commands.add_parser("render"); r.add_argument("--session", required=True); r.add_argument("--spec"); r.add_argument("--trusted-factory", action="store_true"); r.add_argument("--output", required=True); r.add_argument("--dpi", type=int, default=300)
+    r.add_argument("--jpeg-quality", type=int, default=95)
+    r.add_argument("--tiff-compression", choices=["tiff_lzw", "tiff_adobe_deflate", "raw"], default="tiff_lzw")
+    r.add_argument("--transparent", action="store_true")
     s = commands.add_parser("send"); s.add_argument("--session", required=True); s.add_argument("--command", required=True); s.add_argument("--timeout", type=float, default=15)
     d = commands.add_parser("doctor")
     args = parser.parse_args()
@@ -301,11 +322,11 @@ def main():
             if args.session: gui(args.session, args.spec, args.trusted_factory)
             else: welcome()
         elif args.action == "render":
-            if (Path(args.session) / "editor.lock").exists(): raise RuntimeError("Session is locked by an editor; export through send")
-            spec = normalise_spec(read_json(args.spec), Path(args.spec).parent) if args.spec else None
-            scene, spec = open_session(args.session, spec, args.trusted_factory)
-            FigureCanvasAgg(scene.figure)
-            result = scene.export(args.output, args.dpi)
+            with SessionLock(args.session):
+                spec = normalise_spec(read_json(args.spec), Path(args.spec).parent) if args.spec else None
+                scene, spec = open_session(args.session, spec, args.trusted_factory)
+                FigureCanvasAgg(scene.figure)
+                result = scene.export(args.output, args.dpi, jpeg_quality=args.jpeg_quality, tiff_compression=args.tiff_compression, transparent=args.transparent)
             print(json.dumps({"ok": True, "result": result, "audit": scene.audit()}, ensure_ascii=False))
         return 0
     except Exception as exc:
